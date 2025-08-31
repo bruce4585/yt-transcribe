@@ -77,6 +77,7 @@ async function uploadToAssemblyAI({ aaiKey, audioUrl }) {
 }
 
 export default async function handler(req, res) {
+  console.log('[TRANSCRIBE] req.method =', req.method, 'body =', req.body);
   try {
     if (req.method !== 'POST') return res.status(405).json({ error: 'Method Not Allowed' });
 
