@@ -30,6 +30,7 @@ async function fetchMp3LinkWithPolling({ videoId, rapidKey, rapidHost, maxTries 
 
     // ✅ 只读取一次响应体
     const raw = await r.text().catch(() => '');
+    console.log('[RapidAPI][headers]', Object.fromEntries(r.headers.entries()));
     console.log('[RapidAPI][raw]', i, 'status =', r.status, 'body =', raw?.slice(0, 500));
 
     // 再尝试解析 JSON（解析失败则保持 data = {}）
