@@ -17,6 +17,7 @@ function extractYoutubeId(input) {
 
 async function fetchMp3LinkWithPolling({ videoId, rapidKey, rapidHost, maxTries = 25, intervalMs = 3000 }) {
   const endpoint = `https://${rapidHost}/dl?id=${encodeURIComponent(videoId)}`;
+
   for (let i = 0; i < maxTries; i++) {
     const r = await fetch(endpoint, {
       headers: {
@@ -24,18 +25,41 @@ async function fetchMp3LinkWithPolling({ videoId, rapidKey, rapidHost, maxTries 
         'X-RapidAPI-Host': rapidHost,
       },
       cache: 'no-store',
+      redirect: 'follow',
     });
-    const data = await r.json().catch(() => ({}));
-    console.log('[RapidAPI][raw]', i, 'status =', r.status, 'data =', await r.text());
-    const link = data?.link || data?.url;
-    if (link) return { ok: true, link, title: data?.title || '' };
 
-    if (data?.status === 'processing' || data?.msg === 'in queue') {
+    // ✅ 只读取一次响应体
+    const raw = await r.text().catch(() => '');
+    console.log('[RapidAPI][raw]', i, 'status =', r.status, 'body =', raw?.slice(0, 500));
+
+    // 再尝试解析 JSON（解析失败则保持 data = {}）
+    let data = {};
+    try { data = raw ? JSON.parse(raw) : {}; } catch { /* ignore */ }
+
+    // 兼容不同字段名
+    const link =
+      data?.link ||
+      data?.url ||
+      data?.dlink ||
+      data?.data?.link ||
+      data?.data?.url;
+
+    if (link) {
+      console.log('[RapidAPI][choose link]', link);
+      return { ok: true, link, title: data?.title || data?.data?.title || '' };
+    }
+
+    // 排队中的常见返回
+    const status = (data && (data.status || data.msg || data.message || '') + '') .toLowerCase();
+    if (status.includes('processing') || status.includes('queue')) {
       await new Promise((res) => setTimeout(res, intervalMs));
       continue;
     }
+
+    // 其它异常情况
     return { ok: false, error: 'RapidAPI response', data };
   }
+
   return { ok: false, error: 'Timed out waiting for RapidAPI to generate MP3 link' };
 }
 
