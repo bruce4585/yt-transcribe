@@ -26,7 +26,7 @@ async function fetchMp3LinkWithPolling({ videoId, rapidKey, rapidHost, maxTries 
       cache: 'no-store',
     });
     const data = await r.json().catch(() => ({}));
-    console.log('[RapidAPI]', i, 'status =', r.status, 'data =', JSON.stringify(data));
+    console.log('[RapidAPI][raw]', i, 'status =', r.status, 'data =', await r.text());
     const link = data?.link || data?.url;
     if (link) return { ok: true, link, title: data?.title || '' };
 
