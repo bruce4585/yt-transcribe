@@ -39,41 +39,68 @@ async function fetchMp3LinkWithPolling({ videoId, rapidKey, rapidHost, maxTries 
   return { ok: false, error: 'Timed out waiting for RapidAPI to generate MP3 link' };
 }
 
-// ✅ 关键：把远程 mp3 先上传到 AssemblyAI，返回 upload_url
-async function uploadToAssemblyAI({ aaiKey, audioUrl }) {
-  // 尝试拉取远程 mp3（跟随重定向）
-  const audioResp = await fetch(audioUrl, {
+// --- 新增：把远程 mp3 整段抓到 Buffer ---
+async function fetchMp3ToBuffer(audioUrl) {
+  // 某些源必须带 UA，且需要跟随重定向
+  const resp = await fetch(audioUrl, {
     headers: {
-      // 某些源需要 UA 才返回
       'User-Agent':
         'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/123 Safari/537.36',
+      // 有些源需要 Referer，先不写，如果还不行再加：
+      // 'Referer': 'https://www.youtube.com/'
     },
     redirect: 'follow',
-  });
-  if (!audioResp.ok || !audioResp.body) {
-    const t = await audioResp.text().catch(() => '');
-    throw new Error(`Fetch audio failed: ${audioResp.status} ${t}`);
-  }
-
-  // 直接把流转发到 AssemblyAI /upload
-  // （Node 18+/Vercel 默认 fetch 支持可读流透传）
-  const uploadResp = await fetch('https://api.assemblyai.com/v2/upload', {
-    method: 'POST',
-    headers: {
-      Authorization: aaiKey,
-      'Content-Type': 'application/octet-stream',
-    },
-    body: audioResp.body, // 流式上传，避免整段读入内存
+    cache: 'no-store',
   });
 
-  if (!uploadResp.ok) {
-    const errText = await uploadResp.text().catch(() => '');
-    throw new Error(`AssemblyAI upload failed: ${uploadResp.status} ${errText}`);
+  if (!resp.ok) {
+    const t = await resp.text().catch(() => '');
+    throw new Error(`Fetch audio failed: ${resp.status} ${t?.slice(0, 200)}`);
   }
 
-  const uploadData = await uploadResp.json();
-  if (!uploadData?.upload_url) throw new Error('No upload_url from AssemblyAI');
-  return uploadData.upload_url;
+  // 直接把整段读进来（注意内存占用）
+  const arr = await resp.arrayBuffer();
+  return Buffer.from(arr);
+}
+
+// --- 新实现：用 Buffer 上传到 AssemblyAI /upload ---
+async function uploadToAssemblyAI({ aaiKey, audioUrl }) {
+  console.log('[UPLOAD] start download mp3 =>', audioUrl);
+
+  // 这里可以做几次重试，防止短时过期或 5xx
+  let lastErr = null;
+  for (let i = 0; i < 3; i++) {
+    try {
+      const buf = await fetchMp3ToBuffer(audioUrl);
+
+      console.log('[UPLOAD] mp3 size =', buf.length, 'bytes');
+
+      const uploadResp = await fetch('https://api.assemblyai.com/v2/upload', {
+        method: 'POST',
+        headers: {
+          Authorization: aaiKey,
+          'Content-Type': 'application/octet-stream',
+        },
+        body: buf, // 把字节直接发给 AssemblyAI
+      });
+
+      if (!uploadResp.ok) {
+        const errText = await uploadResp.text().catch(() => '');
+        throw new Error(`AssemblyAI upload failed: ${uploadResp.status} ${errText?.slice(0, 200)}`);
+      }
+
+      const uploadData = await uploadResp.json();
+      if (!uploadData?.upload_url) throw new Error('No upload_url from AssemblyAI');
+
+      console.log('[UPLOAD] got upload_url =', uploadData.upload_url);
+      return uploadData.upload_url;
+    } catch (e) {
+      lastErr = e;
+      console.log('[UPLOAD][retry]', i + 1, 'error =', e?.message);
+      await new Promise((r) => setTimeout(r, 1500));
+    }
+  }
+  throw lastErr || new Error('Upload failed');
 }
 
 export default async function handler(req, res) {
