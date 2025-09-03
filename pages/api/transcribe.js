@@ -15,53 +15,88 @@ function extractYoutubeId(input) {
   }
 }
 
-async function fetchMp3LinkWithPolling({ videoId, rapidKey, rapidHost, maxTries = 25, intervalMs = 3000 }) {
+async function fetchMp3LinkWithPolling({
+  videoId,
+  rapidKey,
+  rapidHost,
+  maxTries = 25,
+  intervalMs = 3000,
+}) {
   const endpoint = `https://${rapidHost}/dl?id=${encodeURIComponent(videoId)}`;
 
   for (let i = 0; i < maxTries; i++) {
     const r = await fetch(endpoint, {
       headers: {
-        'X-RapidAPI-Key': rapidKey,
-        'X-RapidAPI-Host': rapidHost,
+        "X-RapidAPI-Key": rapidKey,
+        "X-RapidAPI-Host": rapidHost,
+        // 多给点 Accept，避免被当成爬虫
+        Accept: "application/json, text/plain, */*",
+        // 某些源需要 UA 才返回
+        "User-Agent":
+          "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/123 Safari/537.36",
       },
-      cache: 'no-store',
-      redirect: 'follow',
+      redirect: "follow",
+      cache: "no-store",
     });
 
-    // ✅ 只读取一次响应体
-    const raw = await r.text().catch(() => '');
-    console.log('[RapidAPI][headers]', Object.fromEntries(r.headers.entries()));
-    console.log('[RapidAPI][raw]', i, 'status =', r.status, 'body =', raw?.slice(0, 500));
+    const headers = Object.fromEntries(r.headers.entries());
+    const ct = headers["content-type"] || "";
 
-    // 再尝试解析 JSON（解析失败则保持 data = {}）
+    // 👉 原样输出 header + 完整 body，方便定位（日志页能展开查看）
+    const raw = await r.text().catch(() => "");
+    console.log("[RapidAPI][headers]", headers);
+    console.log("[RapidAPI][raw][full]", raw);
+
+    // 网络非 2xx，等会儿再试
+    if (!r.ok) {
+      await new Promise((res) => setTimeout(res, intervalMs));
+      continue;
+    }
+
+    // 只接受 JSON；如果是 text/html 基本就是广告/反爬或代理页
+    if (!ct.includes("application/json")) {
+      return {
+        ok: false,
+        error: "RapidAPI returned non-JSON (likely HTML/redirect page)",
+        detail: { status: r.status, contentType: ct, bodySnippet: raw.slice(0, 2000) },
+      };
+    }
+
+    // 解析 JSON（并容错）
     let data = {};
-    try { data = raw ? JSON.parse(raw) : {}; } catch { /* ignore */ }
+    try {
+      data = raw ? JSON.parse(raw) : {};
+    } catch (e) {
+      return {
+        ok: false,
+        error: "RapidAPI JSON parse error",
+        detail: { status: r.status, contentType: ct, bodySnippet: raw.slice(0, 2000) },
+      };
+    }
 
     // 兼容不同字段名
     const link =
       data?.link ||
       data?.url ||
-      data?.dlink ||
-      data?.data?.link ||
-      data?.data?.url;
+      data?.audio ||
+      data?.download?.mp3 ||
+      data?.download?.url;
 
     if (link) {
-      console.log('[RapidAPI][choose link]', link);
-      return { ok: true, link, title: data?.title || data?.data?.title || '' };
+      return { ok: true, link, title: data?.title || "" };
     }
 
-    // 排队中的常见返回
-    const status = (data && (data.status || data.msg || data.message || '') + '') .toLowerCase();
-    if (status.includes('processing') || status.includes('queue')) {
+    // 仍在排队/处理中 -> 继续轮询
+    if (data?.status === "processing" || data?.msg === "in queue") {
       await new Promise((res) => setTimeout(res, intervalMs));
       continue;
     }
 
-    // 其它异常情况
-    return { ok: false, error: 'RapidAPI response', data };
+    // 返回了 JSON，但没有链接；把数据带回去方便你在日志里看
+    return { ok: false, error: "RapidAPI JSON but no link", data };
   }
 
-  return { ok: false, error: 'Timed out waiting for RapidAPI to generate MP3 link' };
+  return { ok: false, error: "Timed out waiting for RapidAPI to generate MP3 link" };
 }
 
 // --- 新增：把远程 mp3 整段抓到 Buffer ---
