@@ -170,7 +170,6 @@ export default async function handler(req, res) {
     const videoId = extractYoutubeId(url);
     if (!videoId) return res.status(400).json({ error: 'Invalid YouTube URL' });
 
-    const rapidKey = process.env.RAPIDAPI_KEY;
     // 新写法（只保留 RAPIDAPI_KEY；不再需要 rapidHost）
     const rapidKey = process.env.RAPIDAPI_KEY;
     if (!rapidKey) {
