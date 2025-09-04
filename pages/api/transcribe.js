@@ -171,13 +171,14 @@ export default async function handler(req, res) {
     if (!videoId) return res.status(400).json({ error: 'Invalid YouTube URL' });
 
     const rapidKey = process.env.RAPIDAPI_KEY;
-    const rapidHost = process.env.RAPIDAPI_HOST;
-    if (!rapidKey || !rapidHost) {
-      return res.status(500).json({ error: 'Missing RAPIDAPI_KEY or RAPIDAPI_HOST' });
+    // 新写法（只保留 RAPIDAPI_KEY；不再需要 rapidHost）
+    const rapidKey = process.env.RAPIDAPI_KEY;
+    if (!rapidKey) {
+      return res.status(500).json({ error: 'Missing RAPIDAPI_KEY' });
     }
-
-    // 1) 轮询拿 mp3 直链
-    const mp3 = await fetchMp3LinkWithPolling({ videoId, rapidKey, rapidHost });
+    
+    // 1) 取 mp3 直链（新函数名 fetchMp3LinkWithFallback，内置自动换供应商）
+    const mp3 = await fetchMp3LinkWithFallback({ videoId, rapidKey });
     if (!mp3.ok) {
       return res.status(502).json({ error: 'No audio link returned by RapidAPI', data: mp3 });
     }
