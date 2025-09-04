@@ -15,88 +15,84 @@ function extractYoutubeId(input) {
   }
 }
 
-async function fetchMp3LinkWithPolling({
-  videoId,
-  rapidKey,
-  rapidHost,
-  maxTries = 25,
-  intervalMs = 3000,
-}) {
-  const endpoint = `https://${rapidHost}/dl?id=${encodeURIComponent(videoId)}`;
+// ====== 多供应商 RapidAPI 拉取 MP3 链接（自动容错+轮询） ======
+async function fetchMp3LinkWithFallback({ videoId, rapidKey }) {
+  // 这里列出可用的供应商。第一个是你当前使用的；其余两个是占位示例，等会教你怎么从
+  // RapidAPI 控制台抄 “host / path / 参数名” 填进来。
+  const providers = [
+    // 1) 你现在的
+    { host: process.env.RAPIDAPI_HOST || 'youtube-mp36.p.rapidapi.com', path: '/dl', query: 'id' },
 
-  for (let i = 0; i < maxTries; i++) {
-    const r = await fetch(endpoint, {
-      headers: {
-        "X-RapidAPI-Key": rapidKey,
-        "X-RapidAPI-Host": rapidHost,
-        // 多给点 Accept，避免被当成爬虫
-        Accept: "application/json, text/plain, */*",
-        // 某些源需要 UA 才返回
-        "User-Agent":
-          "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/123 Safari/537.36",
-      },
-      redirect: "follow",
-      cache: "no-store",
-    });
+    // 2) 示例：换一个提供商（把 xxx 换成控制台里的 host/path/参数名）
+    // { host: 'youtube-mp3-download1.p.rapidapi.com', path: '/dl', query: 'id' },
 
-    const headers = Object.fromEntries(r.headers.entries());
-    const ct = headers["content-type"] || "";
+    // 3) 示例：再换一个（把 xxx 换成控制台里的 host/path/参数名）
+    // { host: 'ytstream-download-youtube-videos.p.rapidapi.com', path: '/dl', query: 'id' },
+  ];
 
-    // 👉 原样输出 header + 完整 body，方便定位（日志页能展开查看）
-    const raw = await r.text().catch(() => "");
-    console.log("[RapidAPI][headers]", headers);
-    console.log("[RapidAPI][raw][full]", raw);
+  // 通用的解析函数：尽最大可能从 JSON 里找出直链
+  const pickLink = (obj) => {
+    if (!obj || typeof obj !== 'object') return '';
+    return (
+      obj.link || obj.url || obj.audio || obj.mp3 || obj.file ||
+      obj?.data?.link || obj?.data?.url || ''
+    );
+  };
 
-    // 网络非 2xx，等会儿再试
-    if (!r.ok) {
-      await new Promise((res) => setTimeout(res, intervalMs));
-      continue;
+  // 轮询等待的尝试次数/间隔
+  const maxTries = 25;
+  const intervalMs = 3000;
+
+  // 依次尝试不同供应商；每个供应商内部再轮询（等待其生成链接）
+  for (const prov of providers) {
+    const endpoint = `https://${prov.host}${prov.path}?${prov.query}=${encodeURIComponent(videoId)}`;
+    console.log('[RapidAPI][try]', prov.host, endpoint);
+
+    for (let i = 0; i < maxTries; i++) {
+      // 拉一次
+      const r = await fetch(endpoint, {
+        headers: {
+          'X-RapidAPI-Key': rapidKey,
+          'X-RapidAPI-Host': prov.host,
+        },
+        cache: 'no-store',
+        redirect: 'follow',
+      });
+
+      // 先看返回的 content-type，避免拿到 HTML 页面
+      const ctype = r.headers.get('content-type') || '';
+      console.log('[RapidAPI][headers]', Object.fromEntries(r.headers.entries()));
+
+      // 优先 JSON
+      if (ctype.includes('application/json')) {
+        const data = await r.json().catch(() => ({}));
+        const link = pickLink(data);
+        console.log('[RapidAPI][json]', prov.host, 'status =', r.status, 'link =', link);
+
+        if (link) return { ok: true, link, title: data?.title || '' };
+
+        // 常见排队/生成中的状态字段
+        if (data?.status === 'processing' || data?.msg === 'in queue') {
+          await new Promise((res) => setTimeout(res, intervalMs));
+          continue; // 继续轮询这个供应商
+        }
+
+        // 不是可等待的状态，换下一个供应商
+        break;
+      }
+
+      // 如果不是 JSON（多数是 text/html），读一小段原文帮你排错
+      const raw = await r.text().catch(() => '');
+      console.log('[RapidAPI][raw][full]', prov.host, 'status =', r.status, 'body =', raw.slice(0, 500));
+
+      // HTML 基本没救，直接换下一个供应商
+      break;
     }
 
-    // 只接受 JSON；如果是 text/html 基本就是广告/反爬或代理页
-    if (!ct.includes("application/json")) {
-      return {
-        ok: false,
-        error: "RapidAPI returned non-JSON (likely HTML/redirect page)",
-        detail: { status: r.status, contentType: ct, bodySnippet: raw.slice(0, 2000) },
-      };
-    }
-
-    // 解析 JSON（并容错）
-    let data = {};
-    try {
-      data = raw ? JSON.parse(raw) : {};
-    } catch (e) {
-      return {
-        ok: false,
-        error: "RapidAPI JSON parse error",
-        detail: { status: r.status, contentType: ct, bodySnippet: raw.slice(0, 2000) },
-      };
-    }
-
-    // 兼容不同字段名
-    const link =
-      data?.link ||
-      data?.url ||
-      data?.audio ||
-      data?.download?.mp3 ||
-      data?.download?.url;
-
-    if (link) {
-      return { ok: true, link, title: data?.title || "" };
-    }
-
-    // 仍在排队/处理中 -> 继续轮询
-    if (data?.status === "processing" || data?.msg === "in queue") {
-      await new Promise((res) => setTimeout(res, intervalMs));
-      continue;
-    }
-
-    // 返回了 JSON，但没有链接；把数据带回去方便你在日志里看
-    return { ok: false, error: "RapidAPI JSON but no link", data };
+    console.log('[RapidAPI]', prov.host, 'no link, try next provider...');
   }
 
-  return { ok: false, error: "Timed out waiting for RapidAPI to generate MP3 link" };
+  return { ok: false, error: 'No usable MP3 link from all RapidAPI providers' };
 }
 
 // --- 新增：把远程 mp3 整段抓到 Buffer ---
